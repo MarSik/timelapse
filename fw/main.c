@@ -1,6 +1,9 @@
 #include <stdint.h>
 #include <msp430g2553.h>
 
+#include "font.h"
+#include "banner.h"
+
 // Port 1
 #define LED BIT7
 
@@ -48,14 +51,21 @@
 
 void delay_ms(uint16_t ms);
 void lcd_send_cmd(const uint8_t *cmd);
-void lcd_send_data(uint8_t len, const uint8_t *data);
-
-uint8_t trigger_period_deci_minutes = 10;
-volatile uint8_t deci_minutes = 10; // 1 = 6s, 10 = 1 minute
+void lcd_send_data(uint16_t len, const uint8_t *data, uint8_t invert);
+void lcd_send_text(const char *data);
+void backlight_lcd(void);
 
 volatile const uint8_t *spi_ptr = 0x0;
-volatile uint8_t spi_count = 0;
-volatile uint8_t spi_tx_count = 0;
+volatile uint16_t spi_count = 0;
+volatile uint16_t spi_tx_count = 0;
+volatile uint8_t spi_tx_invert = 0x00;
+
+volatile struct _lcd_status {
+  int reinitialize:1;
+  int redraw:1;
+  int backlight:1;
+  int ready:1;
+} lcd_status = {1, 0, 0, 0};
 
 const static uint8_t lcd_init_sequence[] = {
   LCD_MODE | LCD_MODE_ON | LCD_MODE_EXTENDED, // Extended commands
@@ -65,6 +75,18 @@ const static uint8_t lcd_init_sequence[] = {
   LCD_MODE | LCD_MODE_NORMAL, // Basic commands
 
   LCD_DISPLAY | LCD_DISPLAY_NORMAL,
+  0x00
+};
+
+const static uint8_t lcd_first_line[] = {
+  0x80, // Set X coordinates to 0
+  0x40, // Set Y coordinates to 0
+  0x00
+};
+
+const static uint8_t lcd_last_line[] = {
+  0x80, // Set X coordinates to 0
+  0x45, // Set Y coordinates to 5
   0x00
 };
 
@@ -80,15 +102,93 @@ const static uint8_t empty_8B[] = {
 };
 
 void initialize_lcd(void) {
+  lcd_status.reinitialize = 0;
+  lcd_status.redraw = 1;
+
   // Turn on LCD
   P1OUT |= LCD_RESET;
   P1OUT &= ~LCD_POWER;
-  P1OUT &= ~LCD_RESET;
 
-  // Clear reset from LCD
+  // Reset pulse
+  P1OUT &= ~LCD_RESET;
   P1OUT |= LCD_RESET;
 
   lcd_send_cmd(lcd_init_sequence); // Initialize
+  lcd_status.ready = 1;
+}
+
+void draw_digit(uint8_t digit, uint8_t inverted) {
+  uint8_t inversion = inverted ? 0xff : 0x00;
+  lcd_send_data(FONT_SIZE, FONT + FONT_SIZE * (digit + 0x30 - FONT_FIRST), inversion);
+}
+
+void draw_space(void) {
+  lcd_send_data(FONT_SIZE, empty_8B, 0x00);
+}
+
+void draw_number(uint8_t num, uint8_t inverted) {
+  uint8_t ones = num % 10;
+  num /= 10;
+  uint8_t tens = num % 10;
+  num /= 10;
+  uint8_t hundreds = num;
+
+
+  draw_digit(hundreds, inverted);
+  draw_digit(tens, inverted);
+  draw_digit(ones, inverted);
+}
+
+volatile struct _time_setup_cfg {
+	int set:1;
+	int run:1;
+	int selector:2;
+	int prephase:1;
+} time_cfg = {0, 0, 2, 0};
+
+volatile uint8_t time_setup[] = {
+  0x00, // hours
+  0x00, // deka-minutes
+  0x01, // minutes
+  0x00  // deci-minutes
+};
+
+volatile uint8_t time_trigger[] = {
+  0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t time_setup_maximum[] = { 99, 5, 9, 9 };
+
+void draw_lcd(void) {
+  lcd_status.redraw = 0;
+
+  // Print setup line
+  lcd_send_cmd(lcd_first_line);
+  
+  if (time_cfg.run) lcd_send_text("> ");
+  else if (time_cfg.set) lcd_send_text("? ");
+  else lcd_send_text("# ");
+  
+  draw_number(time_setup[0], !time_cfg.run && time_cfg.selector == 0);
+  lcd_send_text("h ");
+  draw_digit(time_setup[1], !time_cfg.run && time_cfg.selector == 1);
+  draw_digit(time_setup[2], !time_cfg.run && time_cfg.selector == 2);
+  lcd_send_text(".");
+  draw_digit(time_setup[3], !time_cfg.run && time_cfg.selector == 3);
+  lcd_send_text("m");
+
+  // Print countdown line
+  lcd_send_cmd(lcd_last_line);
+  
+  lcd_send_text("T-");
+  
+  draw_number(time_trigger[0], 0);
+  lcd_send_text("h ");
+  draw_digit(time_trigger[1], 0);
+  draw_digit(time_trigger[2], 0);
+  lcd_send_text(".");
+  draw_digit(time_trigger[3], 0);
+  lcd_send_text("m");
 }
 
 void main(void)
@@ -131,10 +231,8 @@ void main(void)
 
   initialize_lcd();
 
-  // Clear screen
-  for (int i = 0; i < (84 * 48 / 64); i++) {
-    lcd_send_data(8, empty_8B);
-  }
+  // Clear screen with banner
+  lcd_send_data(BANNER_WIDTH * BANNER_HEIGHT / 8, banner_bits, 0x00);
 
   // Turn off backlight
   P1OUT &= ~LCD_BACKLIGHT;
@@ -185,28 +283,29 @@ void main(void)
     __delay_cycles(100000);
   }
 
-  // Start timer
-  TA0CCR0 = 6 * 512;  				// 0.1 min period (6 secs)
-
   // Setup complete, go to sleep
+  TA0CCR0 = 6 * 512; // 0.1 min period (6 secs)
   P1OUT |= LED; // Disable led
 
   for(;;) {
+   if (lcd_status.reinitialize) {
+     // Reinitialize LCD
+     initialize_lcd();
+   }
+   if (lcd_status.backlight) {
+     backlight_lcd();
+   }
+   if (lcd_status.redraw && lcd_status.ready) {
+     draw_lcd();
+   }
     _BIS_SR(LPM3_bits | GIE); // Enter LPM3 w/ interrupts
   }
 }
 
-__attribute__((__interrupt__(PORT2_VECTOR)))
-static void PORT2_ISR(void)
-{
-  // handle buttons - enable LCD backlight and set the TA0 CC1 to turn it off
+void backlight_lcd(void) {
   P1OUT |= LCD_BACKLIGHT;
+  lcd_status.backlight = 0;
   
-  if (P1OUT & LCD_POWER) {
-    // Reinitialize LCD
-    initialize_lcd();
-  }
-
   TA0CCR1 = TA0R + 512 * LCD_BACKLIGHT_TIMEOUT_S;
   if (TA0CCR1 > TA0CCR0) {
     TA0CCR1 -= TA0CCR0;
@@ -219,9 +318,72 @@ static void PORT2_ISR(void)
 
   TA0CCTL1 = CCIE;				// CCR1 interrupt enabled
   TA0CCTL2 = CCIE;				// CCR2 interrupt enabled
+}
+
+__attribute__((__interrupt__(PORT2_VECTOR)))
+static void PORT2_ISR(void)
+{
+  // handle buttons - enable LCD backlight and set the TA0 CC1 to turn it off
+  lcd_status.backlight = 1;
+
+  if (!lcd_status.ready) {
+    lcd_status.reinitialize = 1;
+  
+    // Clear the interrupt flags
+    P2IFG = 0x0;
+    LPM3_EXIT;
+    return;
+  }
+
+  // Handle buttons
+  if (P2IFG & BUTTON1) {
+    time_cfg.run ^= 0x1;
+    lcd_status.redraw = 1;
+    for (int8_t idx = 3; idx >= 0; idx--) {
+      time_trigger[idx] = time_setup[idx];
+    }
+
+    uint16_t deci_minutes = time_setup[3] + \
+				  time_setup[2] * 10 + \
+				  time_setup[1] * 100 + \
+				  time_setup[0] * 600;
+    if (!deci_minutes) time_cfg.run = 0;
+    time_cfg.set &= ~time_cfg.run;
+  }
+
+  if (time_cfg.run) {
+    // Clear the interrupt flags
+    P2IFG = 0x0;
+    LPM3_EXIT;
+    return;
+  }
+
+  if (P2IFG & BUTTON3) {
+    time_cfg.set ^= 0x01;
+    lcd_status.redraw = 1;
+  }
+
+  if (P2IFG & BUTTON4) {
+    if (time_cfg.set) {
+      if (time_setup[time_cfg.selector] < time_setup_maximum[time_cfg.selector]) time_setup[time_cfg.selector]++;
+    } else {
+      time_cfg.selector++;
+    }
+    lcd_status.redraw = 1;
+  }
+
+  if (P2IFG & BUTTON2) {
+    if (time_cfg.set) {
+      if (time_setup[time_cfg.selector] > 0) time_setup[time_cfg.selector]--;
+    } else {
+      time_cfg.selector--;
+    }
+    lcd_status.redraw = 1;
+  }
 
   // Clear the interrupt flags
   P2IFG = 0x0;
+  LPM3_EXIT;
 }
 
 /*
@@ -234,17 +396,46 @@ static void PORT2_ISR(void)
 __attribute__((__interrupt__(TIMER0_A0_VECTOR)))
 static void TIMER0_A0_ISR(void)
 {
-  P1OUT ^= LED;
-
-  if (deci_minutes > 0) {
-    deci_minutes--;
+  if (!time_cfg.run) {
+    P1OUT |= LED;
     return;
   }
 
-  P2OUT &= ~FOCUS;
+  P1OUT ^= LED;
 
-  TA1CCR0 = 8192; // Start the fast timer - 2 sec turn off time
-  deci_minutes = trigger_period_deci_minutes; // Reset trigger timer
+  lcd_status.redraw = 1;
+
+  // Decrement the lowest non-zero and all lower
+  // are reset to defaults (1:00-- -> 0:59)
+  for (int8_t idx = 3; idx >= 0; idx--) {
+    if (time_trigger[idx]) {
+      time_trigger[idx]--;
+      break;
+    } else {
+      time_trigger[idx] = time_setup_maximum[idx];
+    }
+  }
+      
+  // Trigger when zero
+  if (time_trigger[3] != 0
+       || time_trigger[2] != 0
+       || time_trigger[1] != 0
+       || time_trigger[0] != 0) {
+    LPM3_EXIT;
+    return;
+  }
+
+  if (time_cfg.prephase) {
+    time_cfg.prephase = 0;
+  } else {
+    P2OUT &= ~FOCUS;
+    TA1CCR0 = 8192; // Start the fast timer - 2 sec turn off time
+  }
+
+  for (int8_t idx = 3; idx >= 0; idx--) {
+    time_trigger[idx] = time_setup[idx];
+  }
+  LPM3_EXIT;
 }
 
 // CC1, CC2
@@ -258,6 +449,7 @@ static void TIMER0_A1_ISR(void)
       break;
     case 0x4:    
       // Turn off LCD
+      lcd_status.ready = 0;
       P1OUT |= LCD_POWER;
       TA0CCTL2 &= ~CCIE;				// CCR2 interrupt disabled
       break;
@@ -299,7 +491,7 @@ static void SPI_TX_READY_ISR(void)
 {
     if (spi_tx_count) {
       spi_tx_count--;
-      UCA0TXBUF = *spi_ptr++;
+      UCA0TXBUF = (*spi_ptr++) ^ spi_tx_invert;
 
     } else {
       IE2 &= ~UCA0TXIE;
@@ -319,10 +511,11 @@ void spi_wait(void) {
     ;
 }
 
-void spi_send(uint8_t size, const uint8_t *data) {
+void spi_send(uint16_t size, const uint8_t *data, uint8_t invert) {
   IFG2 &= ~UCA0RXIFG;
   spi_ptr = data;
   spi_count = spi_tx_count = size;
+  spi_tx_invert = invert;
   IE2 |= UCA0TXIE | UCA0RXIE;
   _BIS_SR(GIE); // Enable interrupts
 }
@@ -337,16 +530,27 @@ void lcd_send_cmd(const uint8_t *cmd) {
     len++;
   }
 
-  spi_send(len, cmd);
+  spi_send(len, cmd, 0x00);
 }
 
-void lcd_send_data(uint8_t len, const uint8_t *cmd) {
+void lcd_send_data(uint16_t len, const uint8_t *cmd, uint8_t inversion) {
   spi_wait();
 
   P1OUT &= ~LCD_CS;
   P1OUT |= LCD_DC;
 
-  spi_send(len, cmd);
+  spi_send(len, cmd, inversion);
+}
+
+void lcd_send_text(const char *data) {
+  while (*data) {
+    char chr = *data++;
+    if (chr == ' ') draw_space();
+    else {
+      lcd_send_data(FONT_SIZE, FONT + FONT_SIZE * (chr - FONT_FIRST), 0x00);
+      lcd_send_data(1, empty_8B, 0x00);
+    }
+  }
 }
 
 void delay_ms(uint16_t ms)
