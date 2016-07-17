@@ -3,6 +3,8 @@
 
 #include "font.h"
 #include "banner.h"
+#include "battery_low.h"
+#include "battery_ok.h"
 
 // Port 1
 #define LED BIT7
@@ -159,36 +161,51 @@ volatile uint8_t time_trigger[] = {
 
 static const uint8_t time_setup_maximum[] = { 99, 5, 9, 9 };
 
+volatile uint8_t battery_trigger = 0;
+// every 5 minutes
+#define BATTERY_TRIGGER_MAX (5 * 10)
+volatile uint16_t battery = 0;
+
 void draw_lcd(void) {
   lcd_status.redraw = 0;
 
   // Print setup line
   lcd_send_cmd(lcd_first_line);
   
-  if (time_cfg.run) lcd_send_text("> ");
-  else if (time_cfg.set) lcd_send_text("? ");
-  else lcd_send_text("# ");
-  
-  draw_number(time_setup[0], !time_cfg.run && time_cfg.selector == 0);
-  lcd_send_text("h ");
-  draw_digit(time_setup[1], !time_cfg.run && time_cfg.selector == 1);
-  draw_digit(time_setup[2], !time_cfg.run && time_cfg.selector == 2);
-  lcd_send_text(".");
-  draw_digit(time_setup[3], !time_cfg.run && time_cfg.selector == 3);
-  lcd_send_text("m");
+  if (time_cfg.run) {
+    lcd_send_text("T-");
+    
+    draw_number(time_trigger[0], 0);
+    lcd_send_text("h ");
+    draw_digit(time_trigger[1], 0);
+    draw_digit(time_trigger[2], 0);
+    lcd_send_text(".");
+    draw_digit(time_trigger[3], 0);
+    lcd_send_text("m");
+  }
+  else {
+    if (time_cfg.set) lcd_send_text("? ");
+    else lcd_send_text("# ");
+    
+    draw_number(time_setup[0], time_cfg.selector == 0);
+    lcd_send_text("h ");
+    draw_digit(time_setup[1], time_cfg.selector == 1);
+    draw_digit(time_setup[2], time_cfg.selector == 2);
+    lcd_send_text(".");
+    draw_digit(time_setup[3], time_cfg.selector == 3);
+    lcd_send_text("m");
+  }
 
-  // Print countdown line
+  // Print battery line
   lcd_send_cmd(lcd_last_line);
-  
-  lcd_send_text("T-");
-  
-  draw_number(time_trigger[0], 0);
-  lcd_send_text("h ");
-  draw_digit(time_trigger[1], 0);
-  draw_digit(time_trigger[2], 0);
-  lcd_send_text(".");
-  draw_digit(time_trigger[3], 0);
-  lcd_send_text("m");
+  if (battery == 0) {
+    lcd_send_data(8, empty_8B, 0x00);
+    lcd_send_data(8, empty_8B, 0x00);
+  } else if (battery < 648) {
+    lcd_send_data(BATTERY_LOW_WIDTH, battery_low_bits, 0x00);
+  } else {
+    lcd_send_data(BATTERY_OK_WIDTH, battery_ok_bits, 0x00);
+  }
 }
 
 void main(void)
@@ -239,6 +256,16 @@ void main(void)
 
   BCSCTL1 |= DIVA_3;				// ACLK/8
   BCSCTL3 = XCAP_3;				// 12.5pF cap- setting for 32768Hz crystal
+
+  //
+  // Measure battery voltage
+  // 2.5V internal reference
+  // measure channel 1011 - (Vcc + GND) / 2
+  // Set ADC clock to ACLK
+  //
+  // CONSEQ0 (single channel, single conversion)
+  ADC10CTL0 = SREF0 | ADC10SHT1 | ADC10SHT0 | ADC10SR | REF2_5V | REFON | ADC10ON;
+  ADC10CTL1 = INCH3 | INCH1 | INCH0 | ADC10DIV0 | ADC10SSEL0;  
 
   //
   // Slow timer
@@ -386,6 +413,16 @@ static void PORT2_ISR(void)
   LPM3_EXIT;
 }
 
+// Battery measurement
+__attribute__((__interrupt__(ADC10_VECTOR)))
+static void BATTERY_ADC_ISR(void)
+{
+  ADC10CTL0 &= ~(REFON | ADC10IE | ENC);
+  lcd_status.redraw = 1;
+  battery = ADC10MEM;
+  LPM3_EXIT;
+}
+
 /*
  * Timer A0 - 512 steps / s
  * CC0 - photo capture period (activate FOCUS and Timer A1)
@@ -396,6 +433,14 @@ static void PORT2_ISR(void)
 __attribute__((__interrupt__(TIMER0_A0_VECTOR)))
 static void TIMER0_A0_ISR(void)
 {
+  if (battery_trigger) {
+    battery_trigger--;
+  } else {
+    battery_trigger = BATTERY_TRIGGER_MAX;
+    ADC10CTL0 |= REFON | REF2_5V | ADC10ON | ADC10IE;
+    ADC10CTL0 |= ENC | ADC10SC;
+  }
+
   if (!time_cfg.run) {
     P1OUT |= LED;
     return;
