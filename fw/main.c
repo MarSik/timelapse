@@ -166,6 +166,13 @@ volatile uint8_t battery_trigger = 0;
 #define BATTERY_TRIGGER_MAX (5 * 10)
 volatile uint16_t battery = 0;
 
+#define SYSTEM_PERIOD (512 * 6) // 6s
+#define ACTIVITY_LED_TIMEOUT (512 / 16) // 0.0625s
+
+#define CAPTURE_LENGTH 2048 // 0.5s
+#define CAPTURE_AUX_DELAY 0 // 0
+#define CAPTURE_TRIGGER_DELAY 409 // cca 0.1s
+
 void draw_lcd(void) {
   lcd_status.redraw = 0;
 
@@ -275,13 +282,13 @@ void main(void)
   TA0CCTL0 = CCIE;				// CCR0 interrupt enabled
   TA0CCR0 = 0;  				// Paused timer
 
-  // Backlight timer
-  TA0CCTL1 = CCIE;				// CCR1 interrupt enabled
-  TA0CCR1 = LCD_BACKLIGHT_TIMEOUT_S * 512 - 1;			// Backlight timeout
+  // LED timer
+  TA0CCTL2 = CCIE;				// CCR2 interrupt enabled
+  TA0CCR2 = ACTIVITY_LED_TIMEOUT - 1;           // Activity LED timeout
   
   // LCD timer
-  TA0CCTL2 = CCIE;				// CCR2 interrupt enabled
-  TA0CCR2 = LCD_POWER_TIMEOUT_S * 512 - 1;			// LCD timeout
+  TA0CCTL1 = CCIE;				// CCR1 interrupt enabled
+  TA0CCR1 = LCD_BACKLIGHT_TIMEOUT_S * 512 - 1;	// LCD timeout
 
   TA0CTL = TASSEL_1 | ID_3 | MC_1;		// ACLK, /8 (512/s), upmode
 
@@ -291,15 +298,15 @@ void main(void)
   
   // End of picture time
   TA1CCTL0 = CCIE;				// CCR0 interrupt enabled
-  TA1CCR0 = 0;					// 8192 -> 2 sec; but disabled by default
+  TA1CCR0 = 0;					// 4096 = 1 sec; but disabled by default
 
-  // Led / Aux output time
-  TA1CCTL1 = CCIE;				// CCR1 interrupt enabled
-  TA1CCR1 = 511;				// LED / Aux delay - 0.125 sec
+  // Aux output time
+  // TA1CCTL1 = CCIE;				// CCR1 interrupt enabled
+  // TA1CCR1 = CAPTURE_AUX_DELAY;       	// Aux delay - 0.125 sec
   
   // Trigger time
   TA1CCTL2 = CCIE;				// CCR2 interrupt enabled
-  TA1CCR2 = 4095;				// Trigger delay - 1 sec
+  TA1CCR2 = CAPTURE_TRIGGER_DELAY;		// Trigger delay
 
   TA1CTL = TASSEL_1 | ID_0 | MC_1;		// ACLK, /1 (4096/s), upmode
 
@@ -311,7 +318,7 @@ void main(void)
   }
 
   // Setup complete, go to sleep
-  TA0CCR0 = 6 * 512; // 0.1 min period (6 secs)
+  TA0CCR0 = SYSTEM_PERIOD; // Start main timer
   P1OUT |= LED; // Disable led
 
   for(;;) {
@@ -338,13 +345,7 @@ void backlight_lcd(void) {
     TA0CCR1 -= TA0CCR0;
   }
 
-  TA0CCR2 = TA0R + 512 * LCD_POWER_TIMEOUT_S;
-  if (TA0CCR2 > TA0CCR0) {
-    TA0CCR2 -= TA0CCR0;
-  }
-
   TA0CCTL1 = CCIE;				// CCR1 interrupt enabled
-  TA0CCTL2 = CCIE;				// CCR2 interrupt enabled
 }
 
 __attribute__((__interrupt__(PORT2_VECTOR)))
@@ -381,6 +382,12 @@ static void PORT2_ISR(void)
   if (time_cfg.run) {
     // Clear the interrupt flags
     P2IFG = 0x0;
+    // Reset system timer
+    TA0R = 0;
+    // Reset TA0CC interrupt flags
+    while (TA0IV)
+	    ;
+    // Leave sleep to allow display refresh
     LPM3_EXIT;
     return;
   }
@@ -426,7 +433,8 @@ static void BATTERY_ADC_ISR(void)
 /*
  * Timer A0 - 512 steps / s
  * CC0 - photo capture period (activate FOCUS and Timer A1)
- * CC1 - lcd backlight timer (512 / 1s)
+ * CC1 - activity led timeout
+ * CC2 - lcd backlight timer (512 / 1s)
  */
 
 // CC0
@@ -446,8 +454,10 @@ static void TIMER0_A0_ISR(void)
     return;
   }
 
-  P1OUT ^= LED;
+  // Flash activity LED
+  P1OUT &= ~LED;
 
+  // Redraw LCD if active
   lcd_status.redraw = 1;
 
   // Decrement the lowest non-zero and all lower
@@ -474,7 +484,7 @@ static void TIMER0_A0_ISR(void)
     time_cfg.prephase = 0;
   } else {
     P2OUT &= ~FOCUS;
-    TA1CCR0 = 8192; // Start the fast timer - 2 sec turn off time
+    TA1CCR0 = CAPTURE_LENGTH; // Start the fast timer
   }
 
   for (int8_t idx = 3; idx >= 0; idx--) {
@@ -489,21 +499,29 @@ static void TIMER0_A1_ISR(void)
 {
   switch (TA0IV) {
     case 0x2:
-      P1OUT &= ~LCD_BACKLIGHT;
-      TA0CCTL1 &= ~CCIE;				// CCR1 interrupt disabled
+      // Turn off backlight and then LCD power
+      if (P1OUT & LCD_BACKLIGHT) {
+        P1OUT &= ~LCD_BACKLIGHT;
+        TA0CCR1 = TA0R + 512 * LCD_POWER_TIMEOUT_S;
+        if (TA0CCR1 > TA0CCR0) {
+          TA0CCR1 -= TA0CCR0;
+        }
+      } else {
+        TA0CCTL1 &= ~CCIE;				// CCR1 interrupt disabled
+        lcd_status.ready = 0;
+        P1OUT |= LCD_POWER;
+      }
       break;
     case 0x4:    
-      // Turn off LCD
-      lcd_status.ready = 0;
-      P1OUT |= LCD_POWER;
-      TA0CCTL2 &= ~CCIE;				// CCR2 interrupt disabled
+      // Turn off activity LED unless the capture is in progress
+      if (P2OUT & FOCUS) P1OUT |= LED;
       break;
   }
 }
 
 /*
  * Timer A1 - 4096 steps / s
- * CC1 - activate LED (posibbly used as external trigger)
+ * CC1 - activate AUX output (none present atm)
  * CC2 - activate camera shutter
  * CC0 - deactivate all outputs
  */
@@ -523,7 +541,7 @@ static void TIMER1_A1_ISR(void)
 {
   switch (TA1IV) {
     case 0x2:
-      P1OUT &= ~LED;
+      // No AUX available
       break;
     case 0x4:    
       P2OUT &= ~TRIGGER;
