@@ -213,7 +213,7 @@ volatile uint16_t battery = 0;
 #define SYSTEM_PERIOD (512 * 6) // 6s
 #define ACTIVITY_LED_TIMEOUT (512 / 16) // 0.0625s
 
-#define CAPTURE_LENGTH 2048 // 0.5s
+#define CAPTURE_LENGTH_EXTRA 2048 // 0.5s
 
 void poweroff_lcd(void) {
   lcd_status.ready = 0;
@@ -258,8 +258,8 @@ void draw_lcd(void) {
 
     lcd_send_text(" ext:");
 
-    if (time_setup[EXTON]) lcd_send_text("ON ");
-    else lcd_send_text("OFF");
+    if (time_setup[EXTON]) lcd_send_text("TRG");
+    else lcd_send_text("AUX");
 
     lcd_send_cmd(lcd_delay_line);
     lcd_send_text("tr:");
@@ -287,8 +287,8 @@ void draw_lcd(void) {
     else lcd_send_text_raw("inf", time_cfg.selector == COUNT ? inversion : 0x00);
 
     lcd_send_text(" ext:");
-    if (time_setup[EXTON]) lcd_send_text_raw("ON ", time_cfg.selector == EXTON ? inversion : 0x00);
-    else lcd_send_text_raw("OFF", time_cfg.selector == EXTON ? inversion : 0x00);
+    if (time_setup[EXTON]) lcd_send_text_raw("TRG", time_cfg.selector == EXTON ? inversion : 0x00);
+    else lcd_send_text_raw("AUX", time_cfg.selector == EXTON ? inversion : 0x00);
 
     lcd_send_cmd(lcd_delay_line);
     lcd_send_text("tr:");
@@ -346,6 +346,7 @@ void main(void)
 
   // Configure pullups for ext trigger
   P1REN = EXT;
+  P1OUT &= ~EXT;
 
   // Activate SPI mode
   UCA0CTL1 |= UCSWRST; // UCSI reset
@@ -638,6 +639,11 @@ static void TIMER0_A0_ISR(void)
     return;
   }
 
+  // Reset timer
+  for (int8_t idx = TIMER; idx >= 0; idx--) {
+    time_trigger[idx] = time_setup[idx];
+  }
+
   if (time_cfg.prephase) {
     time_cfg.prephase = 0;
   } else {
@@ -649,10 +655,14 @@ static void TIMER0_A0_ISR(void)
     // Trigger time
     TA1CCTL2 = CCIE;				// CCR2 interrupt enabled
     TA1CCR2 = time_setup[TRIGGER_DELAY] << 2; // Trigger delay
-    
-    // Start the fast timer
-    TA1CCR0 = CAPTURE_LENGTH; 
-    
+  
+    // Reset counter
+    TA1R = 0;
+
+    // Reset TA1CC interrupt flags
+    while (TA1IV)
+      ;
+
     // Count pictures
     if (time_setup[COUNT]) {
       time_trigger[COUNT]--;
@@ -663,12 +673,12 @@ static void TIMER0_A0_ISR(void)
     } else {
       time_cfg.run = !time_setup[EXTON];	
     }
+
+    // Start the fast timer
+    uint16_t max_trigger = TA1CCR1 > TA1CCR2 ? TA1CCR1 : TA1CCR2; 
+    TA1CCR0 = CAPTURE_LENGTH_EXTRA + max_trigger;
   }
 
-  // Reset timer
-  for (int8_t idx = TIMER; idx >= 0; idx--) {
-    time_trigger[idx] = time_setup[idx];
-  }
   LPM3_EXIT;
 }
 
@@ -714,10 +724,15 @@ static void TIMER1_A0_ISR(void)
   P2OUT |= FOCUS | TRIGGER;  
   TA1CCR0 = 0x0; // Stop fast timer
 
-  // Pull-up when EXT enabled, down when not
-  if (time_setup[EXTON]) {
-    P1OUT |= EXT;
-  } else {
+  TA1CCTL1 = 0;				// CCR1 interrupt disabled
+  TA1CCTL2 = 0;				// CCR1 interrupt disabled
+
+  // Reset TA1CC interrupt flags
+  while (TA1IV)
+    ;
+
+  // Pull-down when EXT not enabled
+  if (!time_setup[EXTON]) {
     P1OUT &= ~EXT;
   }
 }
