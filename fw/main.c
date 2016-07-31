@@ -1,3 +1,5 @@
+// vim: sts=2 sw=2
+
 #include <stdint.h>
 #include <msp430g2553.h>
 
@@ -14,7 +16,7 @@
 #define LCD_RESET BIT1
 #define LCD_DC BIT3
 
-#define EXT BIT0
+#define EXTIO BIT0
 
 // Port 2
 #define TRIGGER BIT4
@@ -342,11 +344,11 @@ void main(void)
 
   // Activate P1 interrupt, high to low transition
   // P1IE = EXT; -- Activated only when ARMed with ext trigger enabled
-  P1IES = EXT;
+  P1IES = EXTIO;
 
   // Configure pullups for ext trigger
-  P1REN = EXT;
-  P1OUT &= ~EXT;
+  P1REN = EXTIO;
+  P1OUT &= ~EXTIO;
 
   // Activate SPI mode
   UCA0CTL1 |= UCSWRST; // UCSI reset
@@ -406,7 +408,7 @@ void main(void)
   //
   
   // End of picture time
-  TA1CCTL0 = CCIE;				// CCR0 interrupt enabled
+  TA1CCTL0 = 0; 				// CCR0 interrupt enabled
   TA1CCR0 = 0;					// 4096 = 1 sec; but disabled by default
 
 
@@ -472,12 +474,12 @@ static void PORT1_ISR(void)
 
   if (!time_trigger[COUNT]) time_trigger[COUNT] = 1;
 
-  // Reset system timer
-  TA0R = 0;
-
   // Reset TA0CC interrupt flags
   while (TA0IV)
     ;
+
+  // Reset system timer
+  TA0R = 0;
 
   // Redraw LCD if active
   lcd_status.redraw = 1;
@@ -521,12 +523,13 @@ static void PORT2_ISR(void)
       // Configure external trigger
       // Pull-up when EXT enabled, down when not
       if (time_setup[EXTON]) {
-        P1IE = EXT;
-	P1OUT |= EXT;
+        P1IE = EXTIO;
+	P1OUT |= EXTIO;
       } else {
 	P1IE = 0;
-	P1OUT &= ~EXT;
+	P1OUT &= ~EXTIO;
       }
+
       // Clear the interrupt flags
       P2IFG = 0x0;
       P1IFG = 0x0;
@@ -584,6 +587,9 @@ static void BATTERY_ADC_ISR(void)
   battery = ADC10MEM;
   LPM3_EXIT;
 }
+
+#define TRIGGER_AUX  { P1OUT |= EXTIO; }
+#define TRIGGER_CAMERA { P2OUT &= ~TRIGGER; }
 
 /*
  * Timer A0 - 512 steps / s
@@ -648,6 +654,7 @@ static void TIMER0_A0_ISR(void)
     time_cfg.prephase = 0;
   } else {
     P2OUT &= ~FOCUS;
+
     // Aux output time
     TA1CCTL1 = CCIE;				// CCR1 interrupt enabled
     TA1CCR1 = time_setup[AUX_DELAY] << 2; // Aux delay
@@ -656,8 +663,7 @@ static void TIMER0_A0_ISR(void)
     TA1CCTL2 = CCIE;				// CCR2 interrupt enabled
     TA1CCR2 = time_setup[TRIGGER_DELAY] << 2; // Trigger delay
   
-    // Reset counter
-    TA1R = 0;
+    TA1CCTL0 = CCIE; 				// CCR0 interrupt enabled
 
     // Reset TA1CC interrupt flags
     while (TA1IV)
@@ -672,6 +678,18 @@ static void TIMER0_A0_ISR(void)
       }
     } else {
       time_cfg.run = !time_setup[EXTON];	
+    }
+
+    // Reset counter
+    TA1R = 0;
+
+
+    if (!TA1CCR1) {
+      TRIGGER_AUX;
+    }
+
+    if (!TA1CCR2) {
+      TRIGGER_CAMERA;
     }
 
     // Start the fast timer
@@ -726,6 +744,7 @@ static void TIMER1_A0_ISR(void)
 
   TA1CCTL1 = 0;				// CCR1 interrupt disabled
   TA1CCTL2 = 0;				// CCR1 interrupt disabled
+  TA1CCTL0 = 0;				// CCR0 interrupt disabled
 
   // Reset TA1CC interrupt flags
   while (TA1IV)
@@ -733,7 +752,7 @@ static void TIMER1_A0_ISR(void)
 
   // Pull-down when EXT not enabled
   if (!time_setup[EXTON]) {
-    P1OUT &= ~EXT;
+    P1OUT &= ~EXTIO;
   }
 }
 
@@ -743,10 +762,10 @@ static void TIMER1_A1_ISR(void)
 {
   switch (TA1IV) {
     case 0x2:
-      P1OUT |= EXT; // Pull-up to notify AUX
+      TRIGGER_AUX;
       break;
     case 0x4:    
-      P2OUT &= ~TRIGGER;
+      TRIGGER_CAMERA;
       break;
   }
 }
