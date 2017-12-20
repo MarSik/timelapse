@@ -455,8 +455,8 @@ void backlight_lcd(void) {
   TA0CCTL1 = CCIE;				// CCR1 interrupt enabled
 }
 
-__attribute__((__interrupt__(PORT1_VECTOR)))
-static void PORT1_ISR(void)
+__attribute__((interrupt(PORT1_VECTOR)))
+void PORT1_ISR(void)
 {
   // Clear the interrupt flags
   P1IFG = 0x0;
@@ -488,8 +488,8 @@ static void PORT1_ISR(void)
   LPM3_EXIT; 
 }
 
-__attribute__((__interrupt__(PORT2_VECTOR)))
-static void PORT2_ISR(void)
+__attribute__((interrupt(PORT2_VECTOR)))
+void PORT2_ISR(void)
 {
   // handle buttons - enable LCD backlight and set the TA0 CC1 to turn it off
   lcd_status.backlight = 1;
@@ -579,8 +579,8 @@ static void PORT2_ISR(void)
 }
 
 // Battery measurement
-__attribute__((__interrupt__(ADC10_VECTOR)))
-static void BATTERY_ADC_ISR(void)
+__attribute__((interrupt(ADC10_VECTOR)))
+void BATTERY_ADC_ISR(void)
 {
   ADC10CTL0 &= ~(REFON | ADC10IE | ENC);
   lcd_status.redraw = 1;
@@ -599,8 +599,8 @@ static void BATTERY_ADC_ISR(void)
  */
 
 // CC0
-__attribute__((__interrupt__(TIMER0_A0_VECTOR)))
-static void TIMER0_A0_ISR(void)
+__attribute__((interrupt(TIMER0_A0_VECTOR)))
+void TIMER0_A0_ISR(void)
 {
   if (battery_trigger) {
     battery_trigger--;
@@ -701,8 +701,8 @@ static void TIMER0_A0_ISR(void)
 }
 
 // CC1, CC2
-__attribute__((__interrupt__(TIMER0_A1_VECTOR)))
-static void TIMER0_A1_ISR(void)
+__attribute__((interrupt(TIMER0_A1_VECTOR)))
+void TIMER0_A1_ISR(void)
 {
   switch (TA0IV) {
     case 0x2:
@@ -735,8 +735,8 @@ static void TIMER0_A1_ISR(void)
  */
 
 // CC0
-__attribute__((__interrupt__(TIMER1_A0_VECTOR)))
-static void TIMER1_A0_ISR(void)
+__attribute__((interrupt(TIMER1_A0_VECTOR)))
+void TIMER1_A0_ISR(void)
 {
   P1OUT |= LED;  
   P2OUT |= FOCUS | TRIGGER;  
@@ -757,8 +757,8 @@ static void TIMER1_A0_ISR(void)
 }
 
 // CC1, CC2
-__attribute__((__interrupt__(TIMER1_A1_VECTOR)))
-static void TIMER1_A1_ISR(void)
+__attribute__((interrupt(TIMER1_A1_VECTOR)))
+void TIMER1_A1_ISR(void)
 {
   switch (TA1IV) {
     case 0x2:
@@ -770,8 +770,8 @@ static void TIMER1_A1_ISR(void)
   }
 }
 
-__attribute__((__interrupt__(USCIAB0TX_VECTOR)))
-static void SPI_TX_READY_ISR(void)
+__attribute__((interrupt(USCIAB0TX_VECTOR)))
+void SPI_TX_READY_ISR(void)
 {
     if (spi_tx_count) {
       spi_tx_count--;
@@ -782,8 +782,8 @@ static void SPI_TX_READY_ISR(void)
     }
 }
 
-__attribute__((__interrupt__(USCIAB0RX_VECTOR)))
-static void SPI_TX_DONE_ISR(void)
+__attribute__((interrupt(USCIAB0RX_VECTOR)))
+void SPI_TX_DONE_ISR(void)
 {
   spi_count--;
   IFG2 &= ~UCA0RXIFG;
